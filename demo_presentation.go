@@ -556,3 +556,78 @@ func flowFullDemo(broker *lynxbus.Broker, brokerAddr string) error {
 
 	return nil
 }
+
+// flowStreamProcessingDemo runs only the Stream Processing scenario:
+// consume from orders-raw → transform → re-publish to orders-processed.
+func flowStreamProcessingDemo(broker *lynxbus.Broker, brokerAddr string) error {
+	demoSection(1, "Stream Processing — orders-raw → transform → orders-processed, SessionTimeout, MaxRetries")
+
+	if err := ensureTopic(broker, topicOrdersRaw, 1); err != nil {
+		return err
+	}
+	if err := ensureTopic(broker, topicOrdersOut, 1); err != nil {
+		return err
+	}
+
+	demoSubSection("Pipeline: orders-raw → [consume → uppercase + enrich with timestamp] → orders-processed")
+
+	if err := publishToTopic(brokerAddr, topicOrdersRaw, []messageRecord{
+		{Key: "ord-1", Value: "order-created"},
+		{Key: "ord-2", Value: "order-confirmed"},
+		{Key: "ord-3", Value: "order-packed"},
+		{Key: "ord-4", Value: "order-shipped"},
+	}, nil); err != nil {
+		return err
+	}
+
+	demoSubSection("ConsumerConfig(SessionTimeout=10s) — fast failure detection for stream processors")
+
+	// SessionTimeout=10s: stream processor declares itself dead quickly if it stops heartbeating
+	streamConsumer, err := consumerRun(brokerAddr, []string{topicOrdersRaw},
+		func(cfg *lynxbus.ConsumerConfig) {
+			cfg.GroupID = "stream-processor"
+			cfg.SessionTimeout = 10 * time.Second
+		})
+	if err != nil {
+		return err
+	}
+	defer closeConsumer("stream-processor", streamConsumer)
+
+	rawMessages, err := consumeMessages(streamConsumer, []string{topicOrdersRaw}, 20)
+	if err != nil {
+		return err
+	}
+	logFetchedMessages("stream-input", rawMessages)
+
+	demoSubSection("ProducerConfig(MaxRetries=5, RetryBackoff=200ms) — resilient re-publish to output topic")
+
+	streamOutputProducer, err := producerRun(brokerAddr, topicOrdersOut, func(cfg *lynxbus.ProducerConfig) {
+		cfg.MaxRetries = 5
+		cfg.RetryBackoff = 200 * time.Millisecond
+	})
+	if err != nil {
+		return err
+	}
+	defer closeProducer("stream-output", streamOutputProducer)
+
+	for _, msg := range rawMessages {
+		enriched := fmt.Sprintf(`{"event":%q,"processed_at":%d}`,
+			strings.ToUpper(string(msg.Value)), time.Now().UnixMilli())
+		if err := publishStringMessage(streamOutputProducer, string(msg.Key), enriched); err != nil {
+			return err
+		}
+	}
+	log.Printf("[stream-output] ✓ %d orders transformed: uppercased + enriched with processed_at timestamp", len(rawMessages))
+
+	demoSubSection("Verifying processed output on orders-processed topic")
+	processedMessages, err := consumeOnce(brokerAddr, []string{topicOrdersOut}, 20, "stream-output-consumer",
+		func(cfg *lynxbus.ConsumerConfig) {
+			cfg.GroupID = "stream-output-group"
+		})
+	if err != nil {
+		return err
+	}
+	log.Printf("[stream-output] ✓ %d processed orders confirmed on output topic", len(processedMessages))
+
+	return nil
+}

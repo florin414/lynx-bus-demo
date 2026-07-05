@@ -17,8 +17,8 @@ func main() {
 		}
 	}()
 
-	log.Println("[main] starting full demo — all concepts...")
-	if err := flowFullDemo(broker, brokerAddr); err != nil {
+	log.Println("[main] starting demo — stream processing only...")
+	if err := flowStreamProcessingDemo(broker, brokerAddr); err != nil {
 		logFatal("demo", err)
 	}
 
